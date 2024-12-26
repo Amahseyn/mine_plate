@@ -1,0 +1,7 @@
+ultralytics
+flask
+flask-cors
+psycopg2-binary
+gitpython
+eventlet
+APScheduler
