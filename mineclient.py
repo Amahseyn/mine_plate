@@ -1,5 +1,15 @@
-
-from apscheduler.schedulers.background import BackgroundScheduler
+import eventlet
+eventlet.monkey_patch()
+from flask import Flask, Response, send_file, jsonify,send_from_directory
+from psycopg2.extras import RealDictCursor
+from readsensor import *
+# import socket
+# import json
+from torchvision import transforms
+import base64
+from psycopg2 import sql, OperationalError, DatabaseError
+# import socket
+from flask import request, jsonify, send_file
 import psycopg2
 import cv2
 import threading
@@ -15,12 +25,17 @@ import psycopg2
 import warnings
 import requests
 warnings.filterwarnings("ignore", category=FutureWarning)
+
 params = Parameters()
 from flask_cors import CORS, cross_origin
 from datetime import datetime, timedelta
+from psycopg2 import sql, OperationalError, DatabaseError
+from flask_socketio import SocketIO, emit
 
-video_lock = threading.Lock()
-frame = None 
+
+app = Flask(__name__)
+CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
+socketio = SocketIO(app, cors_allowed_origins="*")
 
 DB_NAME = "license_plate_db"
 DB_USER = "postgres"
@@ -68,17 +83,13 @@ def detectPlateChars(croppedPlate):
             for i in [0,1,3,4,5,6,7]:
                 if clses[i]<10:
                     state = True
-
-
-    # If conditions are not met, maintain the same return structure
     return state, chars, englishchars, confidences
 
 
 
 
 last_detection_time = {}
-# Global dictionary to track last detection times
-def process_frame(img, cameraId,mine_id):
+def process_frame(img, cameraId):
     global last_char_display, last_detection_time
     tick = time.time()
 
@@ -93,22 +104,22 @@ def process_frame(img, cameraId,mine_id):
 
             cls_names = int(box.cls[0])
             if cls_names == 1:
-                state,chars,englishchars, charConfAvg = detectPlateChars(plate_img)
+                state, chars, englishchars, charConfAvg = detectPlateChars(plate_img)
                 char_display = []
-                englishchardisplay=[]
-                
-                if state==True:
+                englishchardisplay = []
+
+                if state:
                     for persianchar in chars:
                         char_display.append(persianchar)
                     for englishchar in englishchars:
                         englishchardisplay.append(englishchar)
+
                     current_char_display = ''.join(englishchardisplay)
                     current_time = datetime.now()
 
-                    # Check if the plate has been detected recently
                     if current_char_display in last_detection_time:
                         last_time = last_detection_time[current_char_display]
-                        time_diff = (current_time - last_time).total_seconds() / 60  # Time difference in minutes
+                        time_diff = (current_time - last_time).total_seconds() / 60
 
                         if time_diff < 5:
                             persian_output = f"{char_display[0]}{char_display[1]}-{char_display[2]}-{char_display[3]}{char_display[4]}{char_display[5]}-{char_display[6]}{char_display[7]}"
@@ -116,9 +127,9 @@ def process_frame(img, cameraId,mine_id):
                             draw = ImageDraw.Draw(img_pil)
                             draw.text((x1, y1 - 30), persian_output, font=persian_font, fill=(255, 0, 0))
                             img = cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
-                            txtout = f"Detected  {last_time.strftime('%Y-%m-%d %H:%M:%S')}"
-                            cv2.putText(img, txtout, (100,200), fontFace=cv2.FONT_HERSHEY_SIMPLEX, fontScale=1, color=(10, 50, 255), thickness=2, lineType=cv2.LINE_AA)
-                            continue  # Skip writing this plate as it was recently detected
+                            txtout = f"Detected {last_time.strftime('%Y-%m-%d %H:%M:%S')}"
+                            cv2.putText(img, txtout, (100, 200), fontFace=cv2.FONT_HERSHEY_SIMPLEX, fontScale=1, color=(10, 50, 255), thickness=2, lineType=cv2.LINE_AA)
+                            continue
 
                     englishoutput = f"{englishchardisplay[0]}{englishchardisplay[1]}-{englishchardisplay[2]}-{englishchardisplay[3]}{englishchardisplay[4]}{englishchardisplay[5]}-{englishchardisplay[6]}{englishchardisplay[7]}"
                     persian_output = f"{char_display[0]}{char_display[1]}-{char_display[2]}-{char_display[3]}{char_display[4]}{char_display[5]}-{char_display[6]}{char_display[7]}"
@@ -126,203 +137,365 @@ def process_frame(img, cameraId,mine_id):
                     draw = ImageDraw.Draw(img_pil)
                     draw.text((x1, y1 - 30), persian_output, font=persian_font, fill=(255, 0, 0))
                     img = cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
-                    # Save images to disk
+
                     timestamp = current_time.strftime("%Y-%m-%d-%H-%M-%S")
                     raw_filename = f"raw_{timestamp}.jpg"
                     plate_filename = f"plt_{timestamp}.jpg"
-                    
+
                     raw_path = os.path.join('static/images/raw', raw_filename)
                     plate_path = os.path.join('static/images/plate', plate_filename)
-                    
+
                     os.makedirs(os.path.dirname(raw_path), exist_ok=True)
                     os.makedirs(os.path.dirname(plate_path), exist_ok=True)
 
                     cv2.imwrite(raw_path, img)
                     cv2.imwrite(plate_path, plate_img)
-                    # Save to database
+
                     raw_url = f"http://localhost:5000/static/images/raw/{raw_filename}"
                     plate_url = f"http://localhost:5000/static/images/plate/{plate_filename}"
-                    #print(raw_url)
                     conn = psycopg2.connect(dbname=DB_NAME, user=DB_USER, password=DB_PASSWORD, host=DB_HOST, port=DB_PORT)
                     cursor = conn.cursor()
-                    valid = check_vehicle_permit(englishoutput, mine_id)
-                    cursor.execute(
-                        """
-                        INSERT INTO plates (date, raw_image_path, plate_cropped_image_path, predicted_string, camera_id,valid)
-                        VALUES (%s, %s, %s, %s, %s,%s)
-                        """,
-                        (timestamp, raw_url, plate_url, englishoutput, cameraId,valid)
-                    )
-                    conn.commit()
-                    cursor.close()
-                    conn.close()
 
+                    try:
+                        # Try to update the endtime if the plate has no endtime
+                        cursor.execute(
+                            """
+                            UPDATE plates
+                            SET endtime = %s
+                            WHERE predicted_string = %s AND endtime IS NULL
+                            RETURNING id, endtime
+                            """,
+                            (timestamp, englishoutput)
+                        )
+
+                        # Fetch the plate ID and endtime after the update
+                        plate_data = cursor.fetchone()
+
+                        if plate_data is None:  # No row was updated, so insert a new record
+                            cursor.execute(
+                                """
+                                INSERT INTO plates (starttime, raw_image_path, plate_cropped_image_path, predicted_string, camera_id)
+                                VALUES (%s, %s, %s, %s, %s)
+                                RETURNING id
+                                """,
+                                (timestamp, raw_url, plate_url, englishoutput, cameraId)
+                            )
+                            plate_id = cursor.fetchone()[0]
+                            time_field = "starttime"
+                        else:
+                            plate_id = plate_data[0]
+                            endtime = plate_data[1]
+                            time_field = "endtime"
+
+                            if endtime == timestamp:  # If endtime matches, send the data via socket
+                                data = {
+                                    "id": str(plate_id),
+                                    "endtime": str(timestamp),
+                                    "raw_image_path": str(raw_url),
+                                    "plate_cropped_image_path": str(plate_url),
+                                    "predicted_string": str(englishoutput)
+                                }
+                                socketio.emit('plate_detected', data)
+
+                        conn.commit()
+
+                    finally:
+                        cursor.close()
+                        conn.close()
 
                     last_detection_time[current_char_display] = current_time
- 
-    # Add FPS overlay
+
+                    # Always send a new detection record if it's a fresh plate detection
+                    data = {
+                        "id": str(plate_id),
+                        time_field: str(timestamp),
+                        "raw_image_path": str(raw_url),
+                        "plate_cropped_image_path": str(plate_url),
+                        "predicted_string": str(englishoutput)
+                    }
+
+                    socketio.emit('plate_detected', data)
+
     tock = time.time()
     elapsed_time = tock - tick
     fps_text = f"FPS: {1 / elapsed_time:.2f}"
     print(fps_text)
+
     return img
 
 
+
+@app.route('/camera/<int:cameraId>/stream', methods=['GET'])
+@cross_origin(supports_credentials=True)
 def video_feed(cameraId):
+    def generate():
         global frame
+        conn = None
+
         try:
             conn = psycopg2.connect(dbname=DB_NAME, user=DB_USER, password=DB_PASSWORD, host=DB_HOST, port=DB_PORT)
             cursor = conn.cursor()
+
+            # Fetch the camera link based on the cameraId
             cursor.execute("SELECT cameralink FROM cameras WHERE id = %s", (cameraId,))
             camera_link = cursor.fetchone()
-            cursor.execute("SELECT mine_id FROM mine_info WHERE cameraid = %s",(str(cameraId),))
-            mine_id = cursor.fetchone()
-            if camera_link is None:
-                print("error: Camera not found, 404")
 
-            camera_link = camera_link[0]  
-            camera_link = "a09.mp4"
+            if camera_link is None:
+                return jsonify({"error": "Camera not found"}), 404
+
+            camera_link = camera_link[0]
+            camera_link = "a09.mp4"  # Extract link from tuple
             cap = cv2.VideoCapture(camera_link)
-            width, height = 1280, 720
-            cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
-            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
-            frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-            frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            fps = 10
-            cap.set(cv2.CAP_PROP_FPS, fps)
+            
             if not cap.isOpened():
                 print(f"Failed to open video stream from {camera_link}")
+                return jsonify({"error": "Failed to open camera stream"}), 500
+
             while True:
                 ret, img = cap.read()
                 if not ret:
                     print("No frames read. Exiting...")
                     break
-                img = cv2.resize(img,(width,height))
-                processed_frame = process_frame(img,cameraId,mine_id)
+
+                img = cv2.resize(img, (1280, 720))
+                
+                processed_frame = process_frame(img,cameraId)
+
 
                 with lock:
                     frame = processed_frame
-                time.sleep(0.05)
-            #cap.release()
+
+                _, buffer = cv2.imencode('.jpg', frame)
+                yield (b'--frame\r\n'
+                       b'Content-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
+                time.sleep(0.01)
+
         except Exception as e:
-            return print(f"error: {str(e)}, 500")
+            print(f"Error: {str(e)}")
+            return jsonify({"error": str(e)}), 500
         finally:
             if conn:
                 cursor.close()
                 conn.close()
 
+    return Response(generate(), mimetype='multipart/x-mixed-replace; boundary=frame')
+
 def get_db_connection():
     conn = psycopg2.connect(dbname=DB_NAME, user=DB_USER, password=DB_PASSWORD, host=DB_HOST, port=DB_PORT)
     return conn
+@socketio.on('connect')
+def handle_connect():
+    print("Client connected")
 
+@socketio.on('message')
+def handle_message(data):
+    print(f"Message received: {data}")
+    # Optionally, you can emit a response back
+    emit('response', {'status': 'Message received'})
 # Function to send data to another server
-# def send_data_to_server():
-#     try:
-#         conn = get_db_connection()
-#         cursor = conn.cursor()
-#         cursor.execute("SELECT * FROM plates WHERE sent = FALSE LIMIT 10;")  # Get unsent records
-#         plates = cursor.fetchall()
+def encode_image_to_base64(image_path):
+    with open(image_path, "rb") as image_file:
+        return base64.b64encode(image_file.read()).decode('utf-8')
+# Function to process images and send data
+def process_and_send_data():
+    while True:
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            
+            # Fetch unsent records
+            cursor.execute("""
+                SELECT * 
+                FROM plates 
+                WHERE (sentstart = FALSE OR (endtime IS NOT NULL AND sentend = FALSE)) 
+                LIMIT 10;
+            """)
+            plates = cursor.fetchall()
 
-#         if plates:
-#             for plate in plates:
-#                 plate_id, date, raw_image, plate_image, predicted_string, camera_id,_,valid = plate
-#                 data = {
-#                     "id": plate_id,
-#                     "date": date,
-#                     "raw_image": raw_image,
-#                     "plate_image": plate_image,
-#                     "predicted_string": predicted_string,
-#                     "camera_id": camera_id,
-#                     'permit':valid
-#                 }
-                
-#                 success = False
-#                 while not success:
-#                     try:
-#                         response = requests.post("http://127.0.0.1:5000/process_data", json=data)
-#                         if response.status_code == 200:
-#                             success = True
-#                             cursor.execute("UPDATE plates SET sent = TRUE WHERE id = %s", (plate_id,))
-#                             conn.commit()
-#                         else:
-#                             # If the response is not OK, wait and retry
-#                             print(f"Error: Received status code {response.status_code} for plate {plate_id}. Retrying...")
-#                             time.sleep(10)  # Wait 10 seconds before retrying
-#                     except requests.exceptions.RequestException as e:
-#                         print(f"Error sending data: {e}. Retrying...")
-#                         time.sleep(10)  # Wait 10 seconds before retrying
-                
-#         cursor.close()
-#         conn.close()
-    
-#     except Exception as e:
-#         print(f"Error in sending data to server: {e}")
+            if plates:
+                for plate in plates:
+                    plate_id, starttime, endtime, raw_image_path, plate_image_path, predicted_string, camera_id, sentstart, sentend = plate
+                    raw_image_path = raw_image_path.replace("http://localhost:5000/","")
+                    plate_image_path = plate_image_path.replace("http://localhost:5000/","")
+                    # Process images to base64
+                    raw_image = encode_image_to_base64(raw_image_path)
+                    plate_image = encode_image_to_base64(plate_image_path)
+
+                    data = {
+                        "plate_id": plate_id,
+                        "starttime": starttime,
+                        "raw_image": raw_image,
+                        "plate_image": plate_image,
+                        "predicted_string": predicted_string,
+                        "camera_id": camera_id,
+                    }
+
+                    if endtime:
+                        data["endtime"] = endtime
+                    
+
+                    success = False
+                    while not success:
+                        try:
+                            response = requests.post("http://5.10.248.37:5000/sync", json=data)
+                            if response.status_code == 200:
+                                success = True
+                                # Update sent status
+                                if endtime:
+                                    cursor.execute("UPDATE plates SET sentend = TRUE WHERE id = %s", (plate_id,))
+                                else:
+                                    cursor.execute("UPDATE plates SET sentstart = TRUE WHERE id = %s", (plate_id,))
+                                conn.commit()
+                                print(f"Data sent successfully for plate ID {plate_id}")
+                            else:
+                                print(f"Server error: {response.status_code} for plate ID {plate_id}. Retrying...")
+                        except requests.exceptions.RequestException as e:
+                            print(f"Connection error: {e}. Retrying in 10 seconds...")
+                            time.sleep(10)  # Retry delay
+            cursor.close()
+            conn.close()
+        except Exception as e:
+            print(f"Error in processing and sending data: {e}")
+
+# Start the background thread
+def start_background_thread():
+    thread = threading.Thread(target=process_and_send_data)
+    thread.daemon = True  # Ensure thread stops with the application
+    thread.start()
+
 
 # Function to schedule sending data every 5 minutes
-def schedule_data_transfer():
-    scheduler = BackgroundScheduler()
-    scheduler.add_job(send_data_to_server, 'interval', minutes=1)
-    scheduler.start()
-def check_vehicle_permit(license_plate, mine_id):
-    """
-    Check if a vehicle with a specific license plate has a valid permit for a given mine.
-
-    Parameters:
-        license_plate (str): The license plate of the vehicle.
-        mine_id (int): The ID of the mine.
-
-    Returns:
-        bool: True if the permit is valid, False otherwise.
-    """
+@app.route('/plates', methods=['GET'])
+@cross_origin(supports_credentials=True)
+def get_all_plates():
+    conn = None
     try:
-        cursor.execute("""
-            SELECT vehicle_id FROM vehicle_info WHERE license_plate = %s
-        """, (license_plate,))
-        vehicle_result = cursor.fetchone()
+        # Get query parameters
+        page = request.args.get('page', type=int, default=1)
+        limit = request.args.get('limit', type=int, default=10)
 
-        if not vehicle_result:
-            print(f"Vehicle with license plate '{license_plate}' not found.")
-            return False
-        
-        vehicle_id = vehicle_result[0]
+        # Dynamic filters
+        filters = []
+        params = []
 
-        cursor.execute("""
-            SELECT start_date, end_date FROM vehicle_permit
-            WHERE vehicle_id = %s AND mine_id = %s
-        """, (vehicle_id, mine_id))
-        permit_result = cursor.fetchone()
+        # Add dynamic filters based on input arguments
+        if 'platename' in request.args:
+            search_value = request.args.get('platename').lower().replace('-', '')
+            filters.append("REPLACE(LOWER(predicted_string), '-', '') LIKE %s")
+            params.append(f"%{search_value}%")
 
-        if not permit_result:
-            print(f"No permit found for vehicle '{license_plate}' at mine ID '{mine_id}'.")
-            return False
+        if 'starttime' in request.args:
+            filters.append("starttime = %s")
+            params.append(request.args.get('starttime'))
 
-        start_date, end_date = permit_result
-        current_date = datetime.now().date()
+        if 'endtime' in request.args:
+            filters.append("endtime = %s")
+            params.append(request.args.get('endtime'))
 
-        if datetime.strptime(start_date, "%Y-%m-%d").date() <= current_date <= datetime.strptime(end_date, "%Y-%m-%d").date():
-            print(f"Vehicle '{license_plate}' has a valid permit for mine ID '{mine_id}'.")
-            return True
+        if 'id' in request.args:
+            filters.append("id = %s")
+            params.append(request.args.get('id', type=int))
+
+        # Connect to the database
+        conn = psycopg2.connect(
+            dbname=DB_NAME,
+            user=DB_USER,
+            password=DB_PASSWORD,
+            host=DB_HOST,
+            port=DB_PORT
+        )
+        cursor = conn.cursor()
+
+        # Build the base query
+        base_query = """
+            SELECT id, starttime,endtime, predicted_string, raw_image_path, plate_cropped_image_path, camera_id
+            FROM plates
+        """
+
+        # Add WHERE clause if there are filters
+        if filters:
+            base_query += " WHERE " + " AND ".join(filters)
+
+        # Fetch the total count with filters
+        count_query = "SELECT COUNT(*) FROM plates"
+        if filters:
+            count_query += " WHERE " + " AND ".join(filters)
+
+        cursor.execute(count_query, tuple(params))
+        total_count = cursor.fetchone()[0]
+
+        # Handle pagination or fetch all records
+        if page == 0:
+            # Fetch all records without pagination
+            query = base_query + " ORDER BY id DESC"
+            cursor.execute(query, tuple(params))
         else:
-            print(f"Permit for vehicle '{license_plate}' at mine ID '{mine_id}' is not valid.")
-            return False
+            # Fetch records with pagination
+            offset = (page - 1) * limit
+            query = base_query + " ORDER BY id DESC LIMIT %s OFFSET %s"
+            cursor.execute(query, tuple(params) + (limit, offset))
+        plates = cursor.fetchall()
 
+        # Format the results
+        plates_list = []
+        for row in plates:
+ 
+            plates_list.append({
+                "id": row[0],
+                "starttime": row[1],
+                "endtime":row[2],
+                "predicted_string": row[3],
+                "raw_image_path": row[4],
+                "cropped_plate_path": row[5]
+            })
+
+        # Build the response
+        response = {
+            "count": total_count,
+            "plates": plates_list,
+        }
+
+        return jsonify(response), 200
+
+    except psycopg2.OperationalError as db_err:
+        return jsonify({"error": f"Database connection failed: {db_err}"}), 500
+    except psycopg2.DatabaseError as sql_err:
+        return jsonify({"error": f"SQL error: {sql_err}"}), 500
     except Exception as e:
-        print(f"Error: {e}")
-        return False
+        return jsonify({"error": f"Unexpected error: {e}"}), 500
+    finally:
+        if 'cursor' in locals() and cursor:
+            cursor.close()
+        if 'conn' in locals() and conn:
+            conn.close()
 
-def main():
-    camera_id = 1  # Example camera ID
 
-    video_thread = threading.Thread(target=video_feed, args=(camera_id,))
-    video_thread.start()
 
-    schedule_data_transfer()
-    try:
-        while True:
-            time.sleep(.05)
-    except KeyboardInterrupt:
-        print("Stopping threads and scheduler.")
-        video_thread.join()
+@app.route('/images/<path:filename>')
+@cross_origin(supports_credentials=True)
+def serve_image(filename):
+    print(f"filename:{filename}")
+    return send_from_directory('static', filename)
 
-if __name__ == "__main__":
-    main()
+@app.before_request
+def basic_authentication():
+    if request.method.lower() == 'options':
+        return Response()
+    
+# def main():
+#     camera_id = 1  # Example camera ID
+
+#     video_thread = threading.Thread(target=video_feed, args=(camera_id,))
+#     video_thread.start()
+
+#     schedule_data_transfer()
+#     try:
+#         while True:
+#             time.sleep(.05)
+#     except KeyboardInterrupt:
+#         print("Stopping threads and scheduler.")
+#         video_thread.join()
+
+if __name__ == '__main__':
+    start_background_thread() 
+    socketio.run(app, host='0.0.0.0',debug=True, port=5000)

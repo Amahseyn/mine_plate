@@ -6,7 +6,7 @@ import datetime
 from PIL import Image, ImageDraw, ImageFont 
 import numpy as np
 import sqlite3
-from dbcode.createdb import insert_plate_data
+from dbcode.createdbmineclient import insert_plate_data
 import tkinter as tk
 from tkinter import filedialog
 from tkinter import messagebox

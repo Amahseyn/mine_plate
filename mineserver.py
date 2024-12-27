@@ -5,6 +5,7 @@ from psycopg2.extras import RealDictCursor
 # from readsensor import *
 # import socket
 # import json
+import base64
 from psycopg2 import sql, OperationalError, DatabaseError
 # import socket
 from flask import request, jsonify, send_file
@@ -31,7 +32,7 @@ from flask_socketio import SocketIO, emit
 
 
 app = Flask(__name__)
-CORS(app, resources={r"/*": {"origins": "http://localhost:3000"}}, supports_credentials=True)
+CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
 socketio = SocketIO(app, cors_allowed_origins="*")
 
 DB_NAME = "license_plate_db"
@@ -231,7 +232,7 @@ plate_images_dir = os.path.join(images_dir, 'plate')
 #                 if not ret:
 #                     print("No frames read. Exiting...")
 #                     break
-#  
+#                 img = cv2.resize(img,(width,height))
 #                 processed_frame = process_frame(img,cameraId)
 
 #                 with lock:
@@ -252,7 +253,164 @@ plate_images_dir = os.path.join(images_dir, 'plate')
                             
 
 #     return Response(generate(), mimetype='multipart/x-mixed-replace; boundary=frame')
+import traceback
 
+@app.route('/sync', methods=['POST'])
+def receive_data():
+    try:
+        data = request.get_json()
+          # Debugging
+        plate_id = data.get('plate_id')
+        starttime = data.get('starttime')
+        endtime = data.get('endtime')
+        predicted_string = data.get('predicted_string')
+        camera_id = data.get('camera_id')
+        raw_image_base64 = data.get('raw_image')
+        plate_image_base64 = data.get('plate_image')
+        
+        print(f"Parsed values - plate_id: {plate_id}, starttime: {starttime}, camera_id: {camera_id}")  # Debugging
+
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        print("Database connection established")  # Debugging
+
+        # Generate filenames based on camera_id and starttime
+        filename_prefix = f"{camera_id}_{plate_id}_{starttime.replace(':', '-')}"
+        raw_filename = f"{filename_prefix}_raw.jpg"
+        plate_filename = f"{filename_prefix}_plate.jpg"
+        print(f"Generated filenames - raw: {raw_filename}, plate: {plate_filename}")  # Debugging
+
+        # Save raw image to file
+        if raw_image_base64:
+            raw_path = os.path.join('static/images/raw', raw_filename)
+            with open(raw_path, 'wb') as f:
+                f.write(base64.b64decode(raw_image_base64))
+            raw_url = f"http://localhost:5000/static/images/raw/{raw_filename}"
+
+        # Save plate image to file
+        if plate_image_base64:
+            plate_path = os.path.join('static/images/plate', plate_filename)
+            with open(plate_path, 'wb') as f:
+                f.write(base64.b64decode(plate_image_base64))
+            plate_url = f"http://localhost:5000/static/images/plate/{plate_filename}"
+
+        if endtime:
+            print("Processing endtime logic")  # Debugging
+            cursor.execute('''
+                SELECT * FROM plates 
+                WHERE plateid = %s AND starttime = %s AND camera_id = %s
+            ''', (plate_id, starttime, camera_id))
+            existing_row = cursor.fetchone()
+            print("Existing row check completed")  # Debugging
+
+            if existing_row:
+                print("Updating existing row")  # Debugging
+                cursor.execute('''
+                    UPDATE plates 
+                    SET 
+                        endtime = %s, 
+                        predicted_string = %s, 
+                        raw_image_path = %s, 
+                        plate_cropped_image_path = %s 
+                    WHERE plateid = %s AND starttime = %s AND camera_id = %s
+                ''', (
+                    endtime, 
+                    predicted_string, 
+                    raw_url if raw_image_base64 else None, 
+                    plate_url if plate_image_base64 else None, 
+                    plate_id, 
+                    starttime, 
+                    camera_id
+                ))
+            else:
+                print("Inserting new row")  # Debugging
+                permit = check_vehicle_permit(cursor,predicted_string, camera_id)
+                cursor.execute('''
+                    INSERT INTO plates (plateid, starttime, endtime, predicted_string, camera_id, raw_image_path, plate_cropped_image_path,permit) 
+                    VALUES (%s, %s, %s, %s, %s, %s,%s,%s)
+                ''', (
+                    plate_id, 
+                    starttime, 
+                    endtime, 
+                    predicted_string, 
+                    camera_id, 
+                    raw_url if raw_image_base64 else None, 
+                    plate_url if plate_image_base64 else None,
+                    permit
+                ))
+        else:
+            print("Processing without endtime")  # Debugging
+            valid = check_vehicle_permit(cursor,predicted_string, camera_id)
+            cursor.execute('''
+                INSERT INTO plates (plateid, starttime, predicted_string, camera_id, raw_image_path, plate_cropped_image_path,permit) 
+                VALUES (%s, %s, %s, %s, %s, %s,%s)
+            ''', (
+                plate_id, 
+                starttime, 
+                predicted_string, 
+                camera_id, 
+                raw_url if raw_image_base64 else None, 
+                plate_url if plate_image_base64 else None,
+                valid
+            ))
+
+        conn.commit()
+        print("Transaction committed")  # Debugging
+        cursor.close()
+        conn.close()
+
+        return jsonify({"message": "Data received and database updated successfully"}), 200
+
+    except Exception as e:
+        print("Error occurred:")
+        traceback.print_exc()  # Prints full traceback for debugging
+        return jsonify({"error": str(e)}), 500
+def check_vehicle_permit(cursor,license_plate, mine_id):
+    """
+    Check if a vehicle with a specific license plate has a valid permit for a given mine.
+
+    Parameters:
+        license_plate (str): The license plate of the vehicle.
+        mine_id (int): The ID of the mine.
+
+    Returns:
+        bool: True if the permit is valid, False otherwise.
+    """
+    try:
+        cursor.execute("""
+            SELECT vehicle_id FROM vehicle_info WHERE license_plate = %s
+        """, (license_plate,))
+        vehicle_result = cursor.fetchone()
+
+        if not vehicle_result:
+            print(f"Vehicle with license plate '{license_plate}' not found.")
+            return False
+        
+        vehicle_id = vehicle_result[0]
+
+        cursor.execute("""
+            SELECT start_date, end_date FROM vehicle_permit
+            WHERE vehicle_id = %s AND mine_id = %s
+        """, (vehicle_id, mine_id))
+        permit_result = cursor.fetchone()
+
+        if not permit_result:
+            print(f"No permit found for vehicle '{license_plate}' at mine ID '{mine_id}'.")
+            return False
+
+        start_date, end_date = permit_result
+        current_date = datetime.now().date()
+
+        if datetime.strptime(start_date, "%Y-%m-%d").date() <= current_date <= datetime.strptime(end_date, "%Y-%m-%d").date():
+            print(f"Vehicle '{license_plate}' has a valid permit for mine ID '{mine_id}'.")
+            return True
+        else:
+            print(f"Permit for vehicle '{license_plate}' at mine ID '{mine_id}' is not valid.")
+            return False
+
+    except Exception as e:
+        print(f"Error: {e}")
+        return False
 @app.route('/plates', methods=['GET'])
 @cross_origin(supports_credentials=True)
 def get_all_plates():
@@ -291,7 +449,7 @@ def get_all_plates():
 
         # Build the base query
         base_query = """
-            SELECT id, date, predicted_string, raw_image_path, plate_cropped_image_path, valid, camera_id
+            SELECT id, starttime,endtime, predicted_string, raw_image_path, plate_cropped_image_path, permit, camera_id
             FROM plates
         """
 
@@ -315,7 +473,7 @@ def get_all_plates():
         else:
             # Fetch records with pagination
             offset = (page - 1) * limit
-            query = base_query + " ORDER BY id LIMIT %s OFFSET %s"
+            query = base_query + " ORDER BY id DESC LIMIT %s OFFSET %s"
             cursor.execute(query, tuple(params) + (limit, offset))
         plates = cursor.fetchall()
 
@@ -323,21 +481,45 @@ def get_all_plates():
         plates_list = []
         for row in plates:
             # Fetch mine_name based on camera_id (mine_id)
-            camera_id = row[6]
+            camera_id = row[7]
             cursor.execute("SELECT mine_name FROM mine_info WHERE mine_id = %s", (camera_id,))
             mine_result = cursor.fetchone()
             mine_name = mine_result[0] if mine_result else None
-
+            if row[6]==False:
             # Append plate data to the list
-            plates_list.append({
-                "id": row[0],
-                "datetime": row[1],
-                "predicted_string": row[2],
-                "raw_image_path": row[3],
-                "cropped_plate_path": row[4],
-                "permit": row[5],
-                "mine_name": mine_name  # Add mine_name to the response
-            })
+                plates_list.append({
+                    "id": row[0],
+                    "starttime": row[1],
+                    "endtime":row[2],
+                    "predicted_string": row[3],
+                    "raw_image_path": row[4],
+                    "cropped_plate_path": row[5],
+                    "permit": row[6],
+                    "mine_name": mine_name  # Add mine_name to the response
+                })
+            
+            else:
+                query = """
+                    SELECT owner_name, organization,contact_number
+                    FROM vehicle_info
+                    WHERE license_plate = %s
+                """
+                cursor.execute(query,(row[3],))
+                (owner_name,organization,contact_number) =cursor.fetchone()
+                plates_list.append({
+                    "id": row[0],
+                    "starttime": row[1],
+                    "endtime":row[2],
+                    "predicted_string": row[3],
+                    "raw_image_path": row[4],
+                    "cropped_plate_path": row[5],
+                    "permit": row[6],
+                    "mine_name": mine_name,
+                    "owner_name":owner_name,
+                    "organization":organization,
+                    "contact_number":contact_number
+                })
+                           
 
         # Build the response
         response = {
@@ -594,18 +776,22 @@ def update_vehicle(vehicle_id):
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
-
+        cursor.execute("SELECT license_plate FROM vehicle_info WHERE vehicle_id = %s", (vehicle_id,))
+        predicted_string = cursor.fetchone()[0]
+        cursor.execute("SELECT raw_image_path FROM plates WHERE predicted_string = %s", (predicted_string,))
+        imagepath = predicted_string = cursor.fetchone()[0]
         # Update vehicle_info
         cursor.execute("""
             UPDATE vehicle_info
-            SET owner_name = %s, organization = %s, contact_number = %s
+            SET owner_name = %s, organization = %s, contact_number = %s , plate_image=%s
             WHERE vehicle_id = %s
-        """, (owner_name, organization, contact_number, vehicle_id))
+        """, (owner_name, organization, contact_number,imagepath, vehicle_id))
 
         if cursor.rowcount == 0:
             return jsonify({"error": "Vehicle not found"}), 404
 
         conn.commit()
+
         return jsonify({"message": "Vehicle updated successfully"}), 200
 
     except Exception as e:
@@ -656,16 +842,26 @@ def patch_vehicle(vehicle_id):
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
-
+        cursor.execute("SELECT license_plate FROM vehicle_info WHERE vehicle_id = %s", (vehicle_id,))
+        predicted_string = cursor.fetchone()[0]
+        #print(predicted_string)
+        cursor.execute("SELECT raw_image_path FROM plates WHERE predicted_string = %s", (predicted_string,))
+        imagepath = predicted_string = cursor.fetchone()[0]
+        print(imagepath)
         # Build dynamic query
         set_clause = ", ".join([f"{field} = %s" for field, _ in fields])
         values = [value for _, value in fields] + [vehicle_id]
-
+        cursor.execute(f"""
+            UPDATE vehicle_info
+            SET plate_image = %s
+            WHERE vehicle_id = %s
+        """, (imagepath,vehicle_id))
         cursor.execute(f"""
             UPDATE vehicle_info
             SET {set_clause}
             WHERE vehicle_id = %s
         """, values)
+        conn.commit()
 
         if cursor.rowcount == 0:
             return jsonify({"error": "Vehicle not found"}), 404
