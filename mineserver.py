@@ -1,6 +1,8 @@
 import eventlet
 eventlet.monkey_patch()
 from flask import Flask, Response, send_file, jsonify,send_from_directory
+from flask import Flask, request, jsonify
+import requests
 from psycopg2.extras import RealDictCursor
 # from readsensor import *
 # import socket
@@ -29,13 +31,14 @@ from flask_cors import CORS, cross_origin
 from datetime import datetime, timedelta
 from psycopg2 import sql, OperationalError, DatabaseError
 from flask_socketio import SocketIO, emit
-
+import traceback
+from flask import Flask, request, jsonify
 
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
 socketio = SocketIO(app, cors_allowed_origins="*")
 
-DB_NAME = "license_plate_db"
+DB_NAME = "server"
 DB_USER = "postgres"
 DB_PASSWORD = "m102030m"
 DB_HOST = "localhost"
@@ -44,216 +47,11 @@ video_capture = None
 frame = None
 lock = threading.Lock()
 
-# device = "cuda" if torch.cuda.is_available() else "cpu"
-# print(f"Using device: {device}")
-# model_object = YOLO("weights/best.pt")
-# modelCharX = torch.hub.load('yolov5', 'custom', "model/CharsYolo.pt", source='local', force_reload=True)
 
-# font_path = "vazir.ttf"
-# persian_font = ImageFont.truetype(font_path, 20)
 dirpath = os.getcwd()
 images_dir = 'images'
 raw_images_dir = os.path.join(images_dir, 'raw')
 plate_images_dir = os.path.join(images_dir, 'plate')
-
-
-# def detectPlateChars(croppedPlate):
-#     """Detect characters on a cropped plate."""
-#     chars, englishchars, confidences = [], [], []
-#     results = modelCharX(croppedPlate)
-#     detections = results.pred[0]
-#     detections = sorted(detections, key=lambda x: x[0])  # Sort by x coordinate
-#     clses = []
-#     for det in detections:
-#         conf = det[4]
-        
-#         if conf > 0.5:
-#             cls = int(det[5].item())  # Ensure cls is an integer
-#             clses.append(int(cls))
-#             char = params.char_id_dict.get(str(int(cls)), '')  # Get character or empty string
-#             englishchar = params.char_id_dict1.get(str(int(cls)), '')  # Get English character or empty string
-#             chars.append(char)
-#             englishchars.append(englishchar)
-#             confidences.append(conf.item())
-#     state= False
-#     if len(chars)==8:
-#         if 10<=clses[2]<=42:
-#             for i in [0,1,3,4,5,6,7]:
-#                 if clses[i]<10:
-#                     state = True
-
-
-#     # If conditions are not met, maintain the same return structure
-#     return state, chars, englishchars, confidences
-
-
-
-
-# last_detection_time = {}
-# # Global dictionary to track last detection times
-# def process_frame(img, cameraId):
-#     global last_char_display, last_detection_time
-#     tick = time.time()
-
-#     results = model_object(img, conf=0.7, stream=True)
-
-#     for detection in results:
-#         bbox = detection.boxes
-#         for box in bbox:
-#             x1, y1, x2, y2 = box.xyxy[0]
-#             x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
-#             plate_img = img[y1:y2, x1:x2]
-
-#             cls_names = int(box.cls[0])
-#             if cls_names == 1:
-#                 state,chars,englishchars, charConfAvg = detectPlateChars(plate_img)
-#                 char_display = []
-#                 englishchardisplay=[]
-                
-#                 if state==True:
-#                     for persianchar in chars:
-#                         char_display.append(persianchar)
-#                     for englishchar in englishchars:
-#                         englishchardisplay.append(englishchar)
-#                     current_char_display = ''.join(englishchardisplay)
-#                     current_time = datetime.now()
-
-#                     # Check if the plate has been detected recently
-#                     if current_char_display in last_detection_time:
-#                         last_time = last_detection_time[current_char_display]
-#                         time_diff = (current_time - last_time).total_seconds() / 60  # Time difference in minutes
-
-#                         if time_diff < 5:
-#                             persian_output = f"{char_display[0]}{char_display[1]}-{char_display[2]}-{char_display[3]}{char_display[4]}{char_display[5]}-{char_display[6]}{char_display[7]}"
-#                             img_pil = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
-#                             draw = ImageDraw.Draw(img_pil)
-#                             draw.text((x1, y1 - 30), persian_output, font=persian_font, fill=(255, 0, 0))
-#                             img = cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
-#                             txtout = f"Detected  {last_time.strftime('%Y-%m-%d %H:%M:%S')}"
-#                             cv2.putText(img, txtout, (100,200), fontFace=cv2.FONT_HERSHEY_SIMPLEX, fontScale=1, color=(10, 50, 255), thickness=2, lineType=cv2.LINE_AA)
-#                             continue  # Skip writing this plate as it was recently detected
-
-#                     englishoutput = f"{englishchardisplay[0]}{englishchardisplay[1]}-{englishchardisplay[2]}-{englishchardisplay[3]}{englishchardisplay[4]}{englishchardisplay[5]}-{englishchardisplay[6]}{englishchardisplay[7]}"
-#                     persian_output = f"{char_display[0]}{char_display[1]}-{char_display[2]}-{char_display[3]}{char_display[4]}{char_display[5]}-{char_display[6]}{char_display[7]}"
-#                     img_pil = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
-#                     draw = ImageDraw.Draw(img_pil)
-#                     draw.text((x1, y1 - 30), persian_output, font=persian_font, fill=(255, 0, 0))
-#                     img = cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
-#                     # Save images to disk
-#                     timestamp = current_time.strftime("%Y-%m-%d-%H-%M-%S")
-#                     raw_filename = f"raw_{timestamp}.jpg"
-#                     plate_filename = f"plt_{timestamp}.jpg"
-                    
-#                     raw_path = os.path.join('static/images/raw', raw_filename)
-#                     plate_path = os.path.join('static/images/plate', plate_filename)
-                    
-#                     os.makedirs(os.path.dirname(raw_path), exist_ok=True)
-#                     os.makedirs(os.path.dirname(plate_path), exist_ok=True)
-
-#                     cv2.imwrite(raw_path, img)
-#                     cv2.imwrite(plate_path, plate_img)
-#                     # Save to database
-#                     raw_url = f"http://localhost:5000/static/images/raw/{raw_filename}"
-#                     plate_url = f"http://localhost:5000/static/images/plate/{plate_filename}"
-#                     #print(raw_url)
-#                     conn = psycopg2.connect(dbname=DB_NAME, user=DB_USER, password=DB_PASSWORD, host=DB_HOST, port=DB_PORT)
-#                     cursor = conn.cursor()
-#                     cursor.execute(
-#                         """
-#                         INSERT INTO plates (date, raw_image_path, plate_cropped_image_path, predicted_string, camera_id)
-#                         VALUES (%s, %s, %s, %s, %s)
-#                         RETURNING id
-#                         """,
-#                         (timestamp, raw_url, plate_url, englishoutput, cameraId)
-#                     )
-#                     plate_id = cursor.fetchone()[0]
-#                     conn.commit()
-#                     cursor.close()
-#                     conn.close()
-
-
-#                     last_detection_time[current_char_display] = current_time
-                    
-#                     try:
-#                         data = {
-#                             "id": plate_id,  
-#                             "date": timestamp,
-#                             "raw_image_path": raw_url,
-#                             "plate_cropped_image_path": plate_url,
-#                             "predicted_string": englishoutput,
-#                             "cameraid": cameraId
-#                         }
-
-#                         # Emit the data via SocketIO with the ID from the database
-#                         socketio.emit('plate_detected', data)
-#                         print(f"Data emitted via SocketIO with ID: {plate_id}")
-#                     except Exception as e:
-#                         print(f"Error emitting data: {e}")
-
-#     # Add FPS overlay
-#     tock = time.time()
-#     elapsed_time = tock - tick
-#     fps_text = f"FPS: {1 / elapsed_time:.2f}"
-#     cv2.putText(img, fps_text, (0, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (10, 50, 255), 2)
-#     return img
-
-# @app.route('/camera/<int:cameraId>/stream', methods=['GET'])
-# @cross_origin(supports_credentials=True)
-# def video_feed(cameraId):
-#     def generate():
-#         global frame
-#         try:
-#             conn = psycopg2.connect(dbname=DB_NAME, user=DB_USER, password=DB_PASSWORD, host=DB_HOST, port=DB_PORT)
-#             cursor = conn.cursor()
-#             #cameraId=1
-#             # Fetch the camera link based on the cameraId
-#             cursor.execute("SELECT cameralink FROM cameras WHERE id = %s", (cameraId,))
-#             camera_link = cursor.fetchone()
-
-#             if camera_link is None:
-#                 return jsonify({"error": "Camera not found"}), 404
-
-#             camera_link = camera_link[0]  # Extract link from tuple
-#             camera_link = 'http://admin:Maziar123@192.168.1.11/cgi-bin/mjpeg'
-#             # Open video stream
-#             cap = cv2.VideoCapture(camera_link)
-#             width, height = 1280, 720
-#             cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
-#             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
-#             frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-#             frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-#             fps = 10
-#             cap.set(cv2.CAP_PROP_FPS, fps)
-#             if not cap.isOpened():
-#                 print(f"Failed to open video stream from {camera_link}")
-#                 return jsonify({"error": "Failed to open camera stream"}), 500
-#             while True:
-#                 ret, img = cap.read()
-#                 if not ret:
-#                     print("No frames read. Exiting...")
-#                     break
-#                 img = cv2.resize(img,(width,height))
-#                 processed_frame = process_frame(img,cameraId)
-
-#                 with lock:
-#                     frame = processed_frame
-
-#                 _, buffer = cv2.imencode('.jpg', frame)
-#                 yield (b'--frame\r\n'
-#                        b'Content-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
-#                 time.sleep(0.05)
-#             #cap.release()
-#         except Exception as e:
-#             return jsonify({"error": str(e)}), 500
-#         finally:
-#             if conn:
-#                 cursor.close()
-#                 conn.close()
-
-                            
-
-#     return Response(generate(), mimetype='multipart/x-mixed-replace; boundary=frame')
-import traceback
 
 @app.route('/sync', methods=['POST'])
 def receive_data():
@@ -267,6 +65,7 @@ def receive_data():
         camera_id = data.get('camera_id')
         raw_image_base64 = data.get('raw_image')
         plate_image_base64 = data.get('plate_image')
+        permit = data.get("permit")
         
         print(f"Parsed values - plate_id: {plate_id}, starttime: {starttime}, camera_id: {camera_id}")  # Debugging
 
@@ -311,7 +110,8 @@ def receive_data():
                         endtime = %s, 
                         predicted_string = %s, 
                         raw_image_path = %s, 
-                        plate_cropped_image_path = %s 
+                        plate_cropped_image_path = %s,
+                        permit = %s 
                     WHERE plateid = %s AND starttime = %s AND camera_id = %s
                 ''', (
                     endtime, 
@@ -320,7 +120,8 @@ def receive_data():
                     plate_url if plate_image_base64 else None, 
                     plate_id, 
                     starttime, 
-                    camera_id
+                    camera_id,
+                    permit
                 ))
             else:
                 print("Inserting new row")  # Debugging
@@ -581,13 +382,13 @@ def get_daily_traffic():
         cursor.execute(date_series_query, (time1, time2))
         date_series = cursor.fetchall()
 
-        # Query to count the daily traffic using string comparison
+        # Query to count the daily traffic using the `starttime` column as text
         query = """
             SELECT 
-                SUBSTRING(date, 1, 10) AS traffic_date,  -- Extract the date part from the string
+                SUBSTRING(starttime, 1, 10) AS traffic_date,  -- Extract the date part from the text
                 COUNT(*) AS count
             FROM plates
-            WHERE SUBSTRING(date, 1, 10) BETWEEN %s AND %s
+            WHERE SUBSTRING(starttime, 1, 10) BETWEEN %s AND %s
             GROUP BY traffic_date
             ORDER BY traffic_date;
         """
@@ -626,7 +427,7 @@ def get_daily_traffic():
         if 'conn' in locals():
             conn.close()
 
-
+#-------------Vehicle--------------------------------------------
 @app.route('/vehicle', methods=['GET'])
 @cross_origin(supports_credentials=True)
 def get_all_vehicles():
@@ -654,13 +455,7 @@ def get_all_vehicles():
             params.append(f"%{request.args.get('organization').lower()}%")
 
         # Connect to the database
-        conn = psycopg2.connect(
-            dbname=DB_NAME,
-            user=DB_USER,
-            password=DB_PASSWORD,
-            host=DB_HOST,
-            port=DB_PORT
-        )
+        conn = get_db_connection()
         cursor = conn.cursor()
 
         # Build the base query
@@ -766,6 +561,7 @@ def create_vehicle():
     finally:
         cursor.close()
         conn.close()
+
 @app.route('/vehicle/<int:vehicle_id>', methods=['PUT'])
 def update_vehicle(vehicle_id):
     data = request.json
@@ -779,13 +575,14 @@ def update_vehicle(vehicle_id):
         cursor.execute("SELECT license_plate FROM vehicle_info WHERE vehicle_id = %s", (vehicle_id,))
         predicted_string = cursor.fetchone()[0]
         cursor.execute("SELECT raw_image_path FROM plates WHERE predicted_string = %s", (predicted_string,))
-        imagepath = predicted_string = cursor.fetchone()[0]
+        imagepath = cursor.fetchone()[0]
+        
         # Update vehicle_info
         cursor.execute("""
             UPDATE vehicle_info
             SET owner_name = %s, organization = %s, contact_number = %s , plate_image=%s
             WHERE vehicle_id = %s
-        """, (owner_name, organization, contact_number,imagepath, vehicle_id))
+        """, (owner_name, organization, contact_number, imagepath, vehicle_id))
 
         if cursor.rowcount == 0:
             return jsonify({"error": "Vehicle not found"}), 404
@@ -844,10 +641,9 @@ def patch_vehicle(vehicle_id):
         cursor = conn.cursor()
         cursor.execute("SELECT license_plate FROM vehicle_info WHERE vehicle_id = %s", (vehicle_id,))
         predicted_string = cursor.fetchone()[0]
-        #print(predicted_string)
         cursor.execute("SELECT raw_image_path FROM plates WHERE predicted_string = %s", (predicted_string,))
-        imagepath = predicted_string = cursor.fetchone()[0]
-        print(imagepath)
+        imagepath = cursor.fetchone()[0]
+        
         # Build dynamic query
         set_clause = ", ".join([f"{field} = %s" for field, _ in fields])
         values = [value for _, value in fields] + [vehicle_id]
@@ -855,7 +651,7 @@ def patch_vehicle(vehicle_id):
             UPDATE vehicle_info
             SET plate_image = %s
             WHERE vehicle_id = %s
-        """, (imagepath,vehicle_id))
+        """, (imagepath, vehicle_id))
         cursor.execute(f"""
             UPDATE vehicle_info
             SET {set_clause}
@@ -866,7 +662,6 @@ def patch_vehicle(vehicle_id):
         if cursor.rowcount == 0:
             return jsonify({"error": "Vehicle not found"}), 404
 
-        conn.commit()
         return jsonify({"message": "Vehicle updated successfully"}), 200
 
     except Exception as e:
@@ -875,7 +670,7 @@ def patch_vehicle(vehicle_id):
     finally:
         cursor.close()
         conn.close()
-
+#Mine ---------------------------------------------------------------------------
 ### POST: Add a new mine record ###
 @app.route('/mine', methods=['POST'])
 @cross_origin(supports_credentials=True)
@@ -1059,7 +854,7 @@ def delete_mine(mine_id):
 
     except Exception as e:
         return jsonify({'error': str(e)}), 400
-
+#Permit----------------------------------------------------------------------------------------------------
 @app.route('/permit', methods=['POST'])
 @cross_origin(supports_credentials=True)
 def add_vehicle_permit():
@@ -1345,6 +1140,312 @@ def get_vehicle_permits():
         return jsonify({'error': f'SQL error: {sql_err}'}), 500
     except Exception as e:
         return jsonify({'error': f'Unexpected error: {e}'}), 500
+#--------Organization----------------------------------
+@app.route('/organizations', methods=['GET'])
+def get_organizations():
+    page = request.args.get('page', default=0, type=int)
+    limit = request.args.get('limit', default=10, type=int)
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    if page == 0:
+        cursor.execute("SELECT * FROM organization")
+        organizations = cursor.fetchall()
+        count = len(organizations)
+    else:
+        offset = (page - 1) * limit
+        cursor.execute("SELECT * FROM organization LIMIT %s OFFSET %s", (limit, offset))
+        organizations = cursor.fetchall()
+        cursor.execute("SELECT COUNT(*) FROM organization")
+        count = cursor.fetchone()[0]
+
+    cursor.close()
+    conn.close()
+
+    response = {
+        "count": count,
+        "organizations": [
+            {
+                "organization_id": org[0],
+                "organization_name": org[1]
+            } for org in organizations
+        ]
+    }
+    return jsonify(response), 200
+
+# GET a specific organization by ID
+@app.route('/organizations/<int:organization_id>', methods=['GET'])
+def get_organization(organization_id):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM organization WHERE organization_id = %s", (organization_id,))
+    organization = cursor.fetchone()
+    cursor.close()
+    conn.close()
+    
+    if organization:
+        response = {
+            "organization_id": organization[0],
+            "organization_name": organization[1]
+        }
+        return jsonify(response), 200
+    else:
+        return jsonify({"error": "Organization not found"}), 404
+
+# POST (create a new organization)
+@app.route('/organizations', methods=['POST'])
+def create_organization():
+    data = request.json
+    organization_name = data.get("organization_name")
+    if not organization_name:
+        return jsonify({"error": "Organization name is required"}), 400
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            "INSERT INTO organization (organization_name) VALUES (%s) RETURNING organization_id",
+            (organization_name,)
+        )
+        organization_id = cursor.fetchone()[0]
+        conn.commit()
+        response = {
+            "organization_id": organization_id,
+            "organization_name": organization_name
+        }
+        return jsonify(response), 201
+    except psycopg2.IntegrityError:
+        conn.rollback()
+        return jsonify({"error": "Organization name must be unique"}), 400
+    finally:
+        cursor.close()
+        conn.close()
+
+# PATCH (update an organization)
+@app.route('/organizations/<int:organization_id>', methods=['PATCH'])
+def update_organization(organization_id):
+    data = request.json
+    organization_name = data.get("organization_name")
+
+    if not organization_name:
+        return jsonify({"error": "Organization name is required for update"}), 400
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            "UPDATE organization SET organization_name = %s WHERE organization_id = %s RETURNING organization_id",
+            (organization_name, organization_id)
+        )
+        updated_id = cursor.fetchone()
+        conn.commit()
+        if updated_id:
+            return jsonify({"organization_id": organization_id, "organization_name": organization_name}), 200
+        else:
+            return jsonify({"error": "Organization not found"}), 404
+    except psycopg2.IntegrityError:
+        conn.rollback()
+        return jsonify({"error": "Organization name must be unique"}), 400
+    finally:
+        cursor.close()
+        conn.close()
+
+# DELETE an organization
+@app.route('/organizations/<int:organization_id>', methods=['DELETE'])
+def delete_organization(organization_id):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM organization WHERE organization_id = %s RETURNING organization_id", (organization_id,))
+    deleted_id = cursor.fetchone()
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+    if deleted_id:
+        return jsonify({"message": "Organization deleted successfully"}), 200
+    else:
+        return jsonify({"error": "Organization not found"}), 404
+
+# Update Server Database with clent Database 
+def process_and_send_data(serveraddress):
+    while True:
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            
+            # Fetch unsent records from 'organization', 'vehicle_info', 'vehicle_organization', and 'vehicle_permit'
+            cursor.execute("""
+                SELECT organization_id, organization_name, sent
+                FROM organization
+                WHERE sent = FALSE
+                LIMIT 10;
+            """)
+            organizations = cursor.fetchall()
+
+            if organizations:
+                for organization in organizations:
+                    org_id, org_name, sent = organization
+
+                    # Prepare data for sending
+                    data = {
+                        "organization_id": org_id,
+                        "organization_name": org_name,
+                    }
+
+                    success = False
+                    while not success:
+                        try:
+                            # Send data to external server
+                            url = f"http://{serveraddress}/sync/organization"
+                            response = requests.post(url, json=data)
+                            
+                            if response.status_code == 200:
+                                success = True
+                                # Update sent status for organization
+                                cursor.execute("UPDATE organization SET sent = TRUE WHERE organization_id = %s", (org_id,))
+                                conn.commit()
+                                print(f"Organization data sent successfully for ID {org_id}")
+                            else:
+                                print(f"Server error: {response.status_code} for organization ID {org_id}. Retrying in 1 minute...")
+                                time.sleep(60)  # Retry after 1 minute
+                        except requests.exceptions.RequestException as e:
+                            print(f"Connection error: {e}. Retrying in 1 minute...")
+                            time.sleep(60)  # Retry after 1 minute
+
+            # Fetch unsent records from 'vehicle_info'
+            cursor.execute("""
+                SELECT vehicle_id, license_plate, owner_name, contact_number, plate_image, sent
+                FROM vehicle_info
+                WHERE sent = FALSE
+                LIMIT 10;
+            """)
+            vehicles = cursor.fetchall()
+
+            if vehicles:
+                for vehicle in vehicles:
+                    vehicle_id, license_plate, owner_name, contact_number, plate_image, sent = vehicle
+
+                    # Encode plate image to base64
+                    #encoded_plate_image = encode_image_to_base64(plate_image)
+                    
+                    # Prepare data for sending
+                    data = {
+                        "vehicle_id": vehicle_id,
+                        "license_plate": license_plate,
+                        "owner_name": owner_name,
+                        "contact_number": contact_number,
+                        
+                    }
+
+                    success = False
+                    while not success:
+                        try:
+                            url = f"http://{serveraddress}/sync/vehicle"
+                            # Send data to external server
+                            response = requests.post(url, json=data)
+                            
+                            if response.status_code == 200:
+                                success = True
+                                # Update sent status for vehicle
+                                cursor.execute("UPDATE vehicle_info SET sent = TRUE WHERE vehicle_id = %s", (vehicle_id,))
+                                conn.commit()
+                                print(f"Vehicle data sent successfully for ID {vehicle_id}")
+                            else:
+                                print(f"Server error: {response.status_code} for vehicle ID {vehicle_id}. Retrying in 1 minute...")
+                                time.sleep(60)  # Retry after 1 minute
+                        except requests.exceptions.RequestException as e:
+                            print(f"Connection error: {e}. Retrying in 1 minute...")
+                            time.sleep(60)  # Retry after 1 minute
+
+            # Fetch unsent records from 'vehicle_organization'
+            cursor.execute("""
+                SELECT vehicle_id, organization_id, sent
+                FROM vehicle_organization
+                WHERE sent = FALSE
+                LIMIT 10;
+            """)
+            vehicle_organizations = cursor.fetchall()
+
+            if vehicle_organizations:
+                for vehicle_org in vehicle_organizations:
+                    vehicle_id, organization_id, sent = vehicle_org
+
+                    # Prepare data for sending
+                    data = {
+                        "vehicle_id": vehicle_id,
+                        "organization_id": organization_id,
+                    }
+
+                    success = False
+                    while not success:
+                        try:
+                            url = f"http://{serveraddress}vehicle_organization"
+                            response = requests.post(url, json=data)                            
+                            if response.status_code == 200:
+                                success = True
+                                cursor.execute("UPDATE vehicle_organization SET sent = TRUE WHERE vehicle_id = %s AND organization_id = %s", (vehicle_id, organization_id))
+                                conn.commit()
+                                print(f"Vehicle organization data sent successfully for vehicle ID {vehicle_id} and organization ID {organization_id}")
+                            else:
+                                print(f"Server error: {response.status_code} for vehicle ID {vehicle_id} and organization ID {organization_id}. Retrying in 1 minute...")
+                                time.sleep(60)  # Retry after 1 minute
+                        except requests.exceptions.RequestException as e:
+                            print(f"Connection error: {e}. Retrying in 1 minute...")
+                            time.sleep(60)  # Retry after 1 minute
+
+            # Fetch unsent records from 'vehicle_permit'
+            cursor.execute("""
+                SELECT permit_id, vehicle_id, mine_id, start_date, end_date, sent
+                FROM vehicle_permit
+                WHERE sent = FALSE
+                LIMIT 10;
+            """)
+            vehicle_permits = cursor.fetchall()
+
+            if vehicle_permits:
+                for permit in vehicle_permits:
+                    permit_id, vehicle_id, mine_id, start_date, end_date, sent = permit
+
+                    # Prepare data for sending
+                    data = {
+                        "permit_id": permit_id,
+                        "vehicle_id": vehicle_id,
+                        "mine_id": mine_id,
+                        "start_date": start_date,
+                        "end_date": end_date,
+                    }
+
+                    success = False
+                    while not success:
+                        try:
+                            url = f"http://{serveraddress}vehicle_permit"
+                            # Send data to external server
+                            response = requests.post(url, json=data)
+                            
+                            if response.status_code == 200:
+                                success = True
+                                # Update sent status for vehicle_permit
+                                cursor.execute("UPDATE vehicle_permit SET sent = TRUE WHERE permit_id = %s", (permit_id,))
+                                conn.commit()
+                                print(f"Vehicle permit data sent successfully for permit ID {permit_id}")
+                            else:
+                                print(f"Server error: {response.status_code} for permit ID {permit_id}. Retrying in 1 minute...")
+                                time.sleep(60)  # Retry after 1 minute
+                        except requests.exceptions.RequestException as e:
+                            print(f"Connection error: {e}. Retrying in 1 minute...")
+                            time.sleep(60)  # Retry after 1 minute
+
+            cursor.close()
+            conn.close()
+        except Exception as e:
+            print(f"Error in processing and sending data: {e}")
+            time.sleep(60)  # Retry after 1 minute if there is any issue
+
+def run_in_background(serveraddress):
+    thread = threading.Thread(target=process_and_send_data(serveraddress))
+    thread.daemon = True  # Ensure the thread is killed when the main program exits
+    thread.start()
 
 @app.route('/images/<path:filename>')
 @cross_origin(supports_credentials=True)
@@ -1358,4 +1459,6 @@ def basic_authentication():
         return Response()
     
 if __name__ == '__main__':
+    serveraddress = "79.142.76.187"
+    run_in_background(serveraddress)
     socketio.run(app, host='0.0.0.0',debug=True, port=5000)
